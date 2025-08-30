@@ -1,0 +1,379 @@
+---
+title: "Predicting the Risk of Heart Disease in a Person Based on their Biomedical Data"
+output: html_notebook
+---
+
+In this project, I used a random forest model to predict the risk of heart disease in a person based on their biomedical data, recorded in the Heart Disease dataset from UC Irvine's Machine Learning Repository.
+
+**Setting the working directory**
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/Delisha/Documents/Data Science with R Class (Summer 2025)/Data")
+```
+
+**Installing necessary packages + setting seed for reproducible results.**
+
+```{r install, include=FALSE}
+# load packages 
+library(tidymodels)
+library(tidyverse)
+library(dplyr)
+library(corrplot)
+library(caret)
+library(recipes)
+library(randomForest)
+library(rpart)
+
+# prefer tidymodels functions in any case of name conflict
+tidymodels::tidymodels_prefer() 
+
+# set seed for reproducible results
+set.seed(1) 
+```
+
+## [**1. Data Set Selection**]{.underline}
+
+I’m using the Cleveland Heart Disease dataset from the UCI Machine Learning Repository. It has 303 patient records and 13 features. Although this does seem like a small dataset, it is well-established in the field of medical machine learning and has been used extensively in academic research for heart disease prediction tasks. I also chose it because the data is publicly available and anonymized, so it does not raise any ethical concerns.
+
+```{r}
+# import the dataset and separate values with a comma
+heart_disease <- read.table("processed.cleveland.data", header = FALSE, sep = ",", na.strings = "?") 
+view(heart_disease)
+```
+
+## [**2. Data Pre-processing**]{.underline}
+
+The na values are represented by a "?" (data type string), so when importing the dataset, I told R to convert all "?" strings into proper NA values.
+
+The column names are not efficiently interpretable (just V1, V2, ...), so I renamed them to the actual attribute names.
+
+```{r}
+# rename columns with attribute names
+colnames(heart_disease) <- c(
+  "age", "sex", "cp", "trestbps", "chol",
+  "fbs", "restecg", "thalach", "exang", "oldpeak",
+  "slope", "ca", "thal", "num"
+)
+
+# view the dataset + make sure column names changed
+view(heart_disease)
+head(heart_disease)
+colSums(is.na(heart_disease))
+```
+
+The only columns with NA values are 'ca' and 'thal'. However, for this project, I will investigate the relationship between CP (presence of chest pain), trestbps (resting blood pressure), chol (serum cholesterol), exang (exercise induced angina), oldpeak (ST depression induced by exercise relative to rest), thalach (maximum heart rate achieved), age, and sex, and the probability that a patient has heart disease using a logistic regression. Therefore, I can drop restecg, fbs, slope, ca, and thal, and do not need to impute/drop any NA values.
+
+```{r}
+heart_disease <- subset(heart_disease, select = -c(restecg, fbs, slope, ca, thal)) 
+head(heart_disease)
+```
+
+The features sex and exang are stored as doubles when they should be factors (categorical variables). The target variable, num, should also be a categorical value (0 or 1). Looking through documentation, I found that the numbers 0-4 indicate the severity of the heart disease, where 0 is no heart disease and 1-4 is having heart disease. I will turn num (the target) into a binary value by grouping anything that is not 0 (1-4) into 1, so 0 will be not having heart disease and 1 will be having heart disease.
+
+```{r}
+# turn sex and exang into factors
+heart_disease$sex <- as.factor(heart_disease$sex)
+heart_disease$exang <- as.factor(heart_disease$exang)
+
+# group num 1-4 into just 1
+heart_disease$num <- ifelse(heart_disease$num == 0, 0, 1)
+
+# turn num into a categorical variable
+heart_disease$num <- as.factor(heart_disease$num)
+
+head(heart_disease)
+```
+
+## [**3. Exploratory Data Analysis**]{.underline}
+
+First, I looked at the summary of my dataset to see the overall spread of my data and especially to check if there are any outliers. I also looked at the correlation between my variables and num to see if they were statistically significant.
+
+```{r}
+summary(heart_disease)
+```
+
+I wasn't able to catch this during pre-processing, but there seems to be an outlier of oldpeak (6.20), so I looked at a histogram to see where this is happening.
+
+```{r}
+hist(heart_disease$oldpeak, main = "Oldpeak (ST Depression)", xlab = "oldpeak", col = "pink")
+```
+
+There are two outliers (values that stray from my distrubtion) and they are both greater than 5, so I will use that to look at and filter them out.
+
+```{r}
+# view the rows --> rows 92 and 124
+subset(heart_disease, oldpeak > 5)
+
+# filter them out
+heart_disease <- subset(heart_disease, oldpeak <= 5)
+view(heart_disease)
+
+# check again
+hist(heart_disease$oldpeak, main = "Oldpeak (ST Depression)", xlab = "oldpeak", col = "pink")
+
+```
+
+I ran a few more univariate analyses to analyze the distribution of the attributes of my dataset. I used histograms for my numeric values and barplots for my categorical values.
+
+age, sex, cp, trestbps, chol, fbs, exang, oldpeak
+
+```{r}
+hist(heart_disease$age, main = "Age Distribution", xlab = "age", col = "red")
+barplot(table(heart_disease$sex), main = "Sex", col = "orange")
+barplot(table(heart_disease$cp), main = "Chest Pain Type", col = "yellow")
+hist(heart_disease$trestbps, main = "Resting BP", xlab = "trestbps", col = "green")
+hist(heart_disease$chol, main = "Serum Cholesterol", xlab = "chol", col = "blue")
+barplot(table(heart_disease$exang), main = "Exercise Induced Angina", col = "violet")
+hist(heart_disease$thalach, main = "Maximum Heart Rate", xlab = "thalach", col = "pink")
+```
+
+According to this, the majority of the people in my sample are between 40 and 70 years of age, and most of them are male (0 --\> woman, 1 --\> man). The majority of people in this dataset also have the highest level of chest pain (4), and a resting blood pressure of around 100-160 in mm/Hg. The majority of them do not have unhealthy levels of fasting blood sugar, exercised induced agina, and ST depression. A lot of them have between 150-350 mg/dl of serum cholestrol, which is according to research, indicates a low or moderate risk of heart disease. The majority of the people also have a maximum heart rate between 110 to 180 bpm, where lower bpm indicates higher risk of having heart disease.
+
+Next, I can look at the relationships between these variables and a prediction of heart_disease.
+
+```{r}
+boxplot(age ~ num, data = heart_disease, col = c("pink", "violet"), main = "Age vs Heart Disease")
+boxplot(trestbps ~ num, data = heart_disease, col = c("pink", "violet"), main = "Resting BP vs Heart Disease")
+boxplot(chol ~ num, data = heart_disease, col = c("pink", "violet"), main = "Cholesterol vs Heart Disease")
+boxplot(oldpeak ~ num, data = heart_disease, col = c("pink", "violet"), main = "Oldpeak vs Heart Disease")
+boxplot(thalach ~ num, data = heart_disease, col = c("pink", "violet"), main = "thalach vs Heart Disease")
+
+```
+
+This shows that older people are more likely to have heart disease, but there is no strong positive correlation. Resting BP and cholestrol did not seem to affect a prediction of heart disease at all on its own (contrary to my expectations), while people with ST Depression seem to have a higher chance of having heart disease. As stated earlier, people with a higher heart rate are healthier than people with lower max heart rates.
+
+I plotted a correlation matrix to see how strongly my variables relate to each other. Because the matrix can only use numeric values, I will create a new dataframe that converts all my binary variables to numeric values.
+
+```{r}
+heart_disease_numeric <- heart_disease %>%
+  mutate(
+    sex = as.numeric(sex),
+    exang = as.numeric(exang),
+    num = as.numeric(num)
+  ) %>%
+  select(age, trestbps, chol, oldpeak, cp, thalach, sex, exang, num)
+
+cor_matrix <- cor(heart_disease_numeric, use = "complete.obs")
+
+corrplot(cor_matrix,
+         method = "color",
+         type = "upper",
+         addCoef.col = "black",
+         tl.cex = 0.8,
+         number.cex = 0.7,
+         col = colorRampPalette(c("blue", "white", "red"))(200))
+
+head(heart_disease)
+```
+
+This shows me that oldpeak and num have a moderate positive correlation (0.42), indicating that higher ST depression is somewhat associated with heart disease. Exang and num also a moderate positive correlation (0.43). There is a weak correlation between sex and num (0.28) that shows that males may be more likely to have heart disease. There is a weak negative correlation between chol and sex, so men possibly have slightly lower cholesterol in this dataset.
+
+## [**4. Feature Engineering**]{.underline}
+
+Based on the correlation matrix, I created some interaction terms to capture potential combined effects between variables that showed moderate correlation.
+
+Oldpeak had one of the strongest effects on num, so looking at age and oldpeak's interaction can help the model learn how age impacts exercise tolerance (older individuals may have more ST depression under stress).
+
+Because there is a wide distribution of cholestrol across the dataset, I also looked at the interaction between age and cholestrol (older people tend to have higher cholesterol levels).
+
+I also looked at an interaction between age and thalach, as older people generally have lower maximum heart rates. This interaction can help the model learn that age modifies the effect of thalach. I also did this for sex, as men have higher maximum heart rates than women.
+
+```{r}
+heart_disease$age_oldpeak <- heart_disease$age * heart_disease$oldpeak
+heart_disease$age_chol <- heart_disease$age * heart_disease$chol
+heart_disease$age_thalach <- heart_disease$age * heart_disease$thalach
+
+heart_disease$sex_numeric <- as.numeric(heart_disease$sex)
+heart_disease$sex_thalach <- heart_disease$sex_numeric * heart_disease$thalach
+heart_disease$sex_numeric <- NULL
+
+head(heart_disease)
+```
+
+## [**5. Model Selection**]{.underline}
+
+I will be using a random forest model to predict the whether or not a patient has heart disease.
+
+Random forests are well-suited for binary classification tasks and are more robust and accurate compared to simpler models like logistic regression. In my case, logistic regression either overfitted the data and memorized the training data, or it underfitted, failing to capture underlying patterns in the variables because of its linear assumptions. Handling non-linear relationships between variables is important in this case (and in any medical context) where interactions between multiple features influence the outcome.
+
+## [**6. Model Training and Evaluation**]{.underline}
+
+I used an 70/30 split on my data (70% for training, 30% for testing).
+
+```{r}
+set.seed(123)
+
+# split data
+split <- initial_split(heart_disease, prop = 0.75)
+
+train_data <- training(split)
+test_data <- testing(split)
+
+# train model
+rf_model <- randomForest(num ~ .,
+                         data = train_data,
+                         importance = TRUE)
+
+print(rf_model)
+```
+
+Using the summary function, I found that:
+
+-   **age**: Each additional year of age decreases the log-odds of the outcome by 0.276.
+
+-   **sex**: Being male increases the log-odds by 1.797.
+
+-   **cp**: A higher chest pain type causes a 0.754 increase in log-odds.
+
+-   **trestbps**: Each unit increase in resting blood pressure raises the log-odds by 0.006.
+
+-   **chol**: Higher cholesterol slightly increases the log-odds by 0.014.
+
+-   **thalach**: Each unit increase in max heart rate reduces the log-odds by 0.153.
+
+-   **exang**: Having exercise-induced angina increases the log-odds by 0.436.
+
+-   ***oldpeak**: Each unit increase in ST depression significantly raises the log-odds by 0.999.*
+
+-   **age_oldpeak**: The interaction of age and ST depression slightly decreases the log-odds by 0.0055.
+
+-   **age_chol**: The interaction of age and cholesterol has a very small negative effect on the log-odds.
+
+-   **age_thalach**: The interaction of age and max heart rate slightly increases the log-odds.
+
+-   **sex_thalach**: The interaction of sex and max heart rate slightly decreases the log-odds.
+
+**Evaluating the Model**\
+I used a confusion matrix to calculate the accuracy, precision, recall, and f1 score of my model.
+
+```{r}
+rf_preds <- predict(rf_model, newdata = test_data)
+table(Predicted = rf_preds, Actual = test_data$num)
+```
+
+There are 34 cases where the model correctly predicted the positive class (0-no heart disease). There are 6 cases where the model incorrectly predicted the positive class (0-no heart disease) when the actual class was negative (1-heart disease). There are 6 cases where the model incorrectly predicted the negative class (1-heart disease) when the actual class was positive (0-no heart disease). Finally, there are 30 cases where the model correctly predicted the negative class (1-heart disease).
+
+My model currently has:
+
+-   [Accuracy]{.underline}: 84.21%
+
+-   [Precision]{.underline}: 83.33%
+
+-   [Recall (Sensitivity):]{.underline} 83.33%
+
+-   [F1 Score]{.underline}: 83.33%
+
+The accuracy of 0.8421 shows that the model is moderately good at predicting the data accurately, but it could be better. It's sensitivity of 0.8333 suggests that the model identified the majority of true positives correctly. However, increasing recall is important, because in a medical context, it is less dangerous to have false positives (telling healthy people they have heart disease) than a false negative (people with the disease are not notified). It's precision of 0.8333 indicates that the model is trustworthy (when it predicts someone has heart disease, there is an \~83% that it is right). The F1 Score 0.8333 shows a good balance between precision and recall.
+
+## [**7. Model Tuning**]{.underline}
+
+To improve my model (with a focus on recall), I will use cross-validation, as it evaluates the model on multiple different data splits rather than just 2, providing a more realistic assessment of its performance on unseen data. I will also use grid search to let the model choose optimal thresholds and hyperparameters based on specific metrics (in this case, I used recall and accuracy).
+
+```{r}
+library(caret)
+library(ranger)
+library(pROC)
+
+set.seed(123)
+
+# name factors for compatibility
+train_data$num <- factor(train_data$num, levels = c(0, 1), labels = c("no", "yes"))
+test_data$num <- factor(test_data$num, levels = c(0, 1), labels = c("no", "yes"))
+
+# cross-validation control
+train_ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = TRUE,
+  verboseIter = FALSE
+)
+
+# hyperparameter tuning grid
+tune_grid <- expand.grid(
+  mtry = seq(1, ncol(train_data) - 1, by = 2),
+  splitrule = c("gini", "extratrees"),
+  min.node.size = c(1, 5, 10)
+)
+
+# train model
+rf_tuned <- train(
+  num ~ .,
+  data = train_data,
+  method = "ranger",
+  metric = "ROC",
+  tuneGrid = tune_grid,
+  trControl = train_ctrl,
+  num.trees = 1000,
+  importance = "impurity"
+)
+```
+
+## [**8. Model Deployment and Interpretation**]{.underline}
+
+I deployed my final model, the tuned random forest model, on the test data.
+
+```{r}
+# predict probabilities on test set
+rf_probs <- predict(rf_tuned, newdata = test_data, type = "prob")
+
+# prepare actual test labels
+test_actual <- test_data$num
+
+# define thresholds to evaluate
+thresholds <- seq(0.3, 0.6, by = 0.01)
+
+# calculate recall, accuracy, and precision at each threshold
+metrics <- sapply(thresholds, function(t) {
+  preds <- factor(ifelse(rf_probs$yes > t, "yes", "no"), levels = c("no", "yes"))
+  cm <- confusionMatrix(preds, test_actual, positive = "yes")
+  c(
+    Recall = as.numeric(cm$byClass["Sensitivity"]),
+    Accuracy = as.numeric(cm$overall["Accuracy"]),
+    Precision = as.numeric(cm$byClass["Precision"])
+  )
+})
+
+# convert results to a data frame and add thresholds
+results <- as.data.frame(t(metrics))
+results$Threshold <- thresholds
+
+print(results)
+
+# filter for recall >= 0.88 and select threshold with max accuracy
+best_high_recall <- subset(results, Recall >= 0.9)
+best_threshold_row <- best_high_recall[which.max(best_high_recall$Accuracy), ]
+
+cat("Best threshold for recall >= 0.9:", best_threshold_row$Threshold, "\n")
+cat("Accuracy:", best_threshold_row$Accuracy, "\n")
+cat("Precision:", best_threshold_row$Precision, "\n")
+cat("Recall:", best_threshold_row$Recall, "\n")
+
+# apply the selected threshold for final predictions
+final_preds <- factor(ifelse(rf_probs$yes > best_threshold_row$Threshold, "yes", "no"), levels = c("no", "yes"))
+final_conf_mat <- confusionMatrix(final_preds, test_actual, positive = "yes")
+print(final_conf_mat)
+
+```
+
+My model's metrics are now
+
+-   [Accuracy]{.underline}: 84.21% (stayed the same)
+
+-   [Precision]{.underline}: 77.27% (decreased slightly)
+
+-   [Recall (Sensitivity):]{.underline} 94.44% (increased by more than 10%)
+
+-   [F1 Score]{.underline}: 85% (increased slightly)
+
+Here, I traded off precision (and didn't focus on accuracy) for recall. This is because in the real world, medical data is often imbalanced (few people have the disease), so the model could get a high accuracy just by predicting “no disease” all the time. High precision means fewer false positives — not wrongly alarming healthy people. I focused on high recall, which means the model is catching almost all the sick patients even if it wrongly predicts healthy people have the disease, which is useful for early diagnosis or intervention. The f1 score reflects a healthy trade-off between the two.
+
+## [**Conclusion**]{.underline}
+
+Overall, my model can be used as a screening tool to prioritize patients for further tests, ultimately contributing to improved patient outcomes through early detection.
+
+See the project presentation here: <https://docs.google.com/presentation/d/1vhESBisiFuTwgaQzurAuP4dkaySKk3bcHMS02v1oIxg/edit?usp=sharing>
+
+Download the dataset here: <https://archive.ics.uci.edu/dataset/45/heart+disease>
